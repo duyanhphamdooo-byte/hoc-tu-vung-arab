@@ -4352,7 +4352,7 @@ class LocalArabicStore {
       throw new Error('Vui lòng nhập từ tiếng Ả Rập hoặc nghĩa tiếng Việt để phân tích.');
     }
 
-    const apiKey = 'AQ.Ab8RN6Lccq-r2Yd-mEAB2bhg371INe6jncF5vGJWZq8rVDswbQ';
+    const apiKey = 'AQ.Ab8RN6Jnb92LWjfZA-M0R2LFq1ouipUjC_CyKAmctF-A9_ISug';
     // Mô hình Gemini thế hệ mới nhất theo chuẩn Google AI (tránh lỗi 404 của model cũ)
     const candidateModels = [
       'gemini-3.6-flash',
@@ -4395,33 +4395,42 @@ Trả về DUY NHẤT một đối tượng JSON hợp lệ (không kèm markdow
     let rawText = '';
 
     for (const model of candidateModels) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(requestBody)
-        });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey
+            },
+            body: JSON.stringify(requestBody)
+          });
 
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData?.error?.message || `HTTP ${response.status} ${response.statusText}`;
-          console.warn(`[Gemini enrichWord] Model ${model} phản hồi: ${errMsg}, chuyển sang mô hình dự phòng...`);
-          lastError = new Error(errMsg);
-          continue;
-        }
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            const errMsg = errData?.error?.message || `HTTP ${response.status} ${response.statusText}`;
+            if ((response.status === 503 || response.status === 429) && attempt === 0) {
+              await new Promise(r => setTimeout(r, 800));
+              continue;
+            }
+            console.warn(`[Gemini enrichWord] Model ${model} phản hồi: ${errMsg}, chuyển sang mô hình dự phòng...`);
+            lastError = new Error(errMsg);
+            break;
+          }
 
-        const data = await response.json();
-        rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        if (rawText) {
-          break;
+          const data = await response.json();
+          rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+          if (rawText) {
+            break;
+          }
+        } catch (err) {
+          console.warn(`[Gemini enrichWord] Lỗi kết nối khi gọi model ${model}:`, err.message);
+          lastError = err;
+          if (attempt === 0) await new Promise(r => setTimeout(r, 600));
         }
-      } catch (err) {
-        console.warn(`[Gemini enrichWord] Lỗi kết nối khi gọi model ${model}:`, err.message);
-        lastError = err;
       }
+      if (rawText) break;
     }
 
     if (!rawText) {
@@ -4477,7 +4486,7 @@ Trả về DUY NHẤT một đối tượng JSON hợp lệ (không kèm markdow
     }
 
     const lower = raw.toLowerCase();
-    const apiKey = 'AQ.Ab8RN6Lccq-r2Yd-mEAB2bhg371INe6jncF5vGJWZq8rVDswbQ';
+    const apiKey = 'AQ.Ab8RN6Jnb92LWjfZA-M0R2LFq1ouipUjC_CyKAmctF-A9_ISug';
     const candidateModels = [
       'gemini-3.6-flash',
       'gemini-flash-latest'
@@ -4571,32 +4580,42 @@ Nhiệm vụ của bạn:
 
     let lastError = null;
     for (const model of candidateModels) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json; charset=utf-8' },
-          body: JSON.stringify(requestBody)
-        });
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json; charset=utf-8',
+              'x-goog-api-key': apiKey
+            },
+            body: JSON.stringify(requestBody)
+          });
 
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          const errMsg = errData?.error?.message || `HTTP ${response.status}`;
-          lastError = new Error(errMsg);
-          continue;
-        }
+          if (!response.ok) {
+            const errData = await response.json().catch(() => ({}));
+            const errMsg = errData?.error?.message || `HTTP ${response.status}`;
+            if ((response.status === 503 || response.status === 429) && attempt === 0) {
+              await new Promise(r => setTimeout(r, 800));
+              continue;
+            }
+            lastError = new Error(errMsg);
+            break;
+          }
 
-        const data = await response.json();
-        const replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (replyText && replyText.trim()) {
-          return {
-            reply: replyText.trim(),
-            intent: 'EXPLAIN_VOCABULARY',
-            actionResult: null
-          };
+          const data = await response.json();
+          const replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (replyText && replyText.trim()) {
+            return {
+              reply: replyText.trim(),
+              intent: 'EXPLAIN_VOCABULARY',
+              actionResult: null
+            };
+          }
+        } catch (err) {
+          lastError = err;
+          if (attempt === 0) await new Promise(r => setTimeout(r, 600));
         }
-      } catch (err) {
-        lastError = err;
       }
     }
 
