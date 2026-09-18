@@ -1345,7 +1345,11 @@
           <div class="flex gap-2 pt-1">
             <button onclick="saveWordFromArabicReader()" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 rounded-lg text-xs flex items-center justify-center gap-1 transition">
               <i data-lucide="bookmark-plus" class="w-3.5 h-3.5"></i>
-              Lưu vào Deck của tôi
+              Lưu vào Deck
+            </button>
+            <button onclick="askAiAboutWord(document.getElementById('ar-popup-word').innerText)" class="px-3 py-2 bg-emerald-950 hover:bg-emerald-900 text-emerald-300 font-semibold rounded-lg text-xs flex items-center gap-1 transition">
+              <i data-lucide="sparkles" class="w-3.5 h-3.5"></i>
+              Hỏi AI
             </button>
             <button onclick="closeArabicReaderPopup()" class="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-lg text-xs">
               Đóng
@@ -4342,59 +4346,264 @@ class LocalArabicStore {
     };
   }
 
-  enrichWord(query = '') {
-    const raw = (query || '').trim().toLowerCase();
-    const vocab = this.getVocabulary();
+  async enrichWord(query = '') {
+    const raw = (query || '').trim();
+    if (!raw) {
+      throw new Error('Vui lòng nhập từ tiếng Ả Rập hoặc nghĩa tiếng Việt để phân tích.');
+    }
 
-    // Check existing vocabulary first
-    const found = vocab.find(v => 
-      v.word_no_harakat.toLowerCase() === raw || 
-      v.word_with_harakat.includes(raw) || 
-      v.primary_meaning_vi.toLowerCase().includes(raw)
-    );
+    const apiKey = 'AQ.Ab8RN6Lccq-r2Yd-mEAB2bhg371INe6jncF5vGJWZq8rVDswbQ';
+    // Mô hình Gemini thế hệ mới nhất theo chuẩn Google AI (tránh lỗi 404 của model cũ)
+    const candidateModels = [
+      'gemini-3.6-flash',
+      'gemini-flash-latest'
+    ];
 
-    if (found) {
+    const prompt = `Bạn là một chuyên gia ngôn ngữ học tiếng Ả Rập và tiếng Việt.
+Hãy phân tích từ hoặc câu truy vấn sau: "${raw}" (có thể là từ tiếng Ả Rập hoặc từ tiếng Việt).
+Nếu đầu vào là tiếng Việt, hãy dịch sang từ vựng tiếng Ả Rập chuẩn xác, thông dụng nhất và phân tích từ tiếng Ả Rập đó.
+Nếu đầu vào là tiếng Ả Rập, hãy phân tích chi tiết từ đó.
+
+Trả về DUY NHẤT một đối tượng JSON hợp lệ (không kèm markdown bọc ngoài, không thêm lời dẫn) với đúng các trường sau:
+{
+  "wordWithHarakat": "từ tiếng Ả Rập kèm đầy đủ dấu thanh (harakat: fatha, damma, kasra, sukun, shaddah, tanwin)",
+  "wordPlain": "từ tiếng Ả Rập không dấu thanh",
+  "primaryMeaningVi": "nghĩa tiếng Việt chính xác, phổ biến và ngắn gọn",
+  "ipa": "phiên âm quốc tế IPA chuẩn (ví dụ: /kiˈtaːb/)",
+  "transliteration": "phiên âm Latin chuẩn (ví dụ: kitāb)",
+  "rootLetters": "các chữ cái gốc (root letters) bằng chữ Ả Rập nối nhau bằng dấu gạch ngang (ví dụ: ك-ت-ب)",
+  "patternWazn": "khuôn từ / wazn (ví dụ: فِعَال hoặc فَعَل)",
+  "pluralForm": "dạng số nhiều tiếng Ả Rập có kèm dấu thanh nếu là danh từ, hoặc null nếu không có hoặc không áp dụng",
+  "partOfSpeech": "từ loại (noun, verb, adjective, preposition, v.v.)",
+  "gender": "giống của từ (masculine hoặc feminine)",
+  "exampleAr": "câu ví dụ tiếng Ả Rập tự nhiên kèm đầy đủ dấu thanh minh họa từ này",
+  "exampleVi": "dịch nghĩa tiếng Việt của câu ví dụ trên"
+}`;
+
+    const requestBody = {
+      contents: [
+        {
+          parts: [{ text: prompt }]
+        }
+      ],
+      generationConfig: {
+        responseMimeType: "application/json"
+      }
+    };
+
+    let lastError = null;
+    let rawText = '';
+
+    for (const model of candidateModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData?.error?.message || `HTTP ${response.status} ${response.statusText}`;
+          console.warn(`[Gemini enrichWord] Model ${model} phản hồi: ${errMsg}, chuyển sang mô hình dự phòng...`);
+          lastError = new Error(errMsg);
+          continue;
+        }
+
+        const data = await response.json();
+        rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (rawText) {
+          break;
+        }
+      } catch (err) {
+        console.warn(`[Gemini enrichWord] Lỗi kết nối khi gọi model ${model}:`, err.message);
+        lastError = err;
+      }
+    }
+
+    if (!rawText) {
+      throw new Error(`Không thể phân tích từ ngữ qua Google AI: ${lastError ? lastError.message : 'Không nhận được dữ liệu từ Gemini'}`);
+    }
+
+    // Làm sạch định dạng JSON nếu có markdown code block
+    let cleanJson = rawText.trim();
+    if (cleanJson.startsWith('```')) {
+      cleanJson = cleanJson.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanJson);
+    } catch (parseErr) {
+      console.error('[Gemini enrichWord] Lỗi phân tích JSON từ Gemini:', cleanJson, parseErr);
+      throw new Error('Dữ liệu phản hồi từ Gemini không đúng định dạng JSON.');
+    }
+
+    const isArabic = /[\u0600-\u06FF]/.test(raw);
+    const fallbackPlain = isArabic ? raw.replace(/[\u064B-\u0655\u0670\u0640]/g, '').trim() : '';
+
+    return {
+      wordWithHarakat: parsed.wordWithHarakat || raw,
+      wordPlain: parsed.wordPlain || fallbackPlain || (parsed.wordWithHarakat ? parsed.wordWithHarakat.replace(/[\u064B-\u0655\u0670\u0640]/g, '').trim() : raw),
+      primaryMeaningVi: parsed.primaryMeaningVi || (isArabic ? 'Từ vựng tiếng Ả Rập' : raw),
+      ipa: parsed.ipa || '',
+      transliteration: parsed.transliteration || '',
+      rootLetters: parsed.rootLetters || '',
+      patternWazn: parsed.patternWazn || '',
+      pluralForm: parsed.pluralForm || null,
+      partOfSpeech: parsed.partOfSpeech || 'noun',
+      gender: parsed.gender || 'masculine',
+      exampleAr: parsed.exampleAr || '',
+      exampleVi: parsed.exampleVi || '',
+      // Tương thích ngược với hệ thống từ vựng
+      primaryMeaningEn: parsed.primaryMeaningEn || '',
+      cefrLevel: parsed.cefrLevel || 'A2',
+      pluralType: parsed.pluralForm ? (parsed.pluralForm.endsWith('ات') ? 'sound_feminine' : 'broken') : null,
+      foundInLexicon: false
+    };
+  }
+
+  async processAiChat(message = '', preferredDeckId = null) {
+    const raw = (message || '').trim();
+    if (!raw) {
       return {
-        foundInLexicon: true,
-        wordWithHarakat: found.word_with_harakat,
-        wordPlain: found.word_no_harakat,
-        primaryMeaningVi: found.primary_meaning_vi,
-        primaryMeaningEn: found.primary_meaning_en,
-        partOfSpeech: found.part_of_speech,
-        cefrLevel: found.cefr_level,
-        ipa: found.ipa,
-        transliteration: found.transliteration,
-        rootLetters: found.linguistic?.root_letters || 'ع-ر-ب',
-        patternWazn: found.linguistic?.pattern_wazn || 'فَعَل',
-        pluralForm: found.linguistic?.plural_form,
-        pluralType: found.linguistic?.plural_type,
-        gender: found.linguistic?.gender || 'masculine',
-        exampleAr: found.example?.sentence_ar_harakat || '',
-        exampleVi: found.example?.sentence_vi || ''
+        reply: 'Vui lòng nhập câu hỏi hoặc yêu cầu thêm từ vựng.',
+        intent: 'EMPTY',
+        actionResult: null
       };
     }
 
-    // Heuristic generator for Arabic or Vietnamese query
-    const isArabic = /[\u0600-\u06FF]/.test(raw);
-    const plain = raw.replace(/[\u064B-\u0655\u0670\u0640]/g, '').trim();
+    const lower = raw.toLowerCase();
+    const apiKey = 'AQ.Ab8RN6Lccq-r2Yd-mEAB2bhg371INe6jncF5vGJWZq8rVDswbQ';
+    const candidateModels = [
+      'gemini-3.6-flash',
+      'gemini-flash-latest'
+    ];
+
+    // 1. Kiểm tra ý định ôn tập
+    if (/ôn tập|luyện tập|ôn từ|cứu từ|weak word|bắt đầu ôn/i.test(lower)) {
+      return {
+        reply: `🎯 **Chế độ Ôn tập FSRS đã sẵn sàng!**\n\nBạn có thể bấm nút bên dưới để mở ngay phiên luyện tập với các thẻ từ vựng cần củng cố trí nhớ.`,
+        intent: 'REVIEW_VOCABULARY',
+        actionResult: { deepLink: 'review' }
+      };
+    }
+
+    // 2. Kiểm tra ý định thêm từ vựng mới
+    const isAdd = /^(thêm|nạp|add|tạo)\s+(từ|từ vựng)?/i.test(lower) || /nghĩa là.*vào (deck|bộ)/i.test(lower);
+    if (isAdd) {
+      try {
+        const arMatch = raw.match(/[\u0600-\u06FF]+/g);
+        const arabicTerm = arMatch ? arMatch.join(' ') : null;
+
+        const meaningMatch = raw.match(/nghĩa\s+(?:là\s+)?([^,.;]+?)(?=\s+(?:vào|trong|cho|ở)\s+(?:deck|bộ)|$)/i);
+        const customMeaning = meaningMatch ? meaningMatch[1].trim() : null;
+
+        let targetDeck = preferredDeckId || 'deck-ar-beginner';
+        const deckMatch = raw.match(/deck\s+([a-zA-Z0-9_\u0600-\u06FF\s-]+)|bộ\s+(?:thẻ\s+)?([a-zA-Z0-9_\u0600-\u06FF\s-]+)/i);
+        if (deckMatch) {
+          const deckQuery = (deckMatch[1] || deckMatch[2] || '').trim().toLowerCase();
+          const allDecks = this.getDecksList();
+          const matched = allDecks.find(d => (d.title_vi || '').toLowerCase().includes(deckQuery) || (d.id || '').toLowerCase().includes(deckQuery));
+          if (matched) targetDeck = matched.id;
+        }
+
+        const queryTerm = arabicTerm || raw.replace(/thêm|nạp|từ|vựng|vào|deck|bộ/gi, '').trim();
+        const enriched = await this.enrichWord(queryTerm);
+
+        if (customMeaning) {
+          enriched.primaryMeaningVi = customMeaning;
+        }
+
+        this.addWord({
+          wordWithHarakat: enriched.wordWithHarakat,
+          wordPlain: enriched.wordPlain,
+          primaryMeaningVi: enriched.primaryMeaningVi,
+          ipa: enriched.ipa,
+          partOfSpeech: enriched.partOfSpeech,
+          cefrLevel: enriched.cefrLevel || 'A1',
+          deckId: targetDeck,
+          rootLetters: enriched.rootLetters,
+          patternWazn: enriched.patternWazn,
+          pluralForm: enriched.pluralForm,
+          gender: enriched.gender,
+          exampleAr: enriched.exampleAr,
+          exampleVi: enriched.exampleVi
+        });
+
+        return {
+          reply: `✅ **Đã nạp từ vựng thành công vào kho học!**\n\n` +
+                 `• **Từ vựng**: **${enriched.wordWithHarakat}** (*${enriched.transliteration || ''}*)\n` +
+                 `• **Ý nghĩa**: ${enriched.primaryMeaningVi}\n` +
+                 `• **Căn tố (جذر)**: ${enriched.rootLetters || 'N/A'}\n` +
+                 `• **Khuôn mẫu (وزن)**: ${enriched.patternWazn || 'N/A'}\n` +
+                 (enriched.pluralForm ? `• **Số nhiều**: ${enriched.pluralForm}\n` : '') +
+                 (enriched.exampleAr ? `• **Ví dụ**: *${enriched.exampleAr}* — ${enriched.exampleVi}\n` : '') +
+                 `• **Bộ thẻ**: \`${targetDeck}\`\n\n` +
+                 `💡 *Từ này đã được kích hoạt trong hệ thống và sẵn sàng để bạn ôn tập!*`,
+          intent: 'ADD_VOCABULARY',
+          actionResult: { success: true, enriched }
+        };
+      } catch (addErr) {
+        console.warn('[processAiChat] Thêm từ tự động thất bại, chuyển sang trả lời câu hỏi:', addErr);
+      }
+    }
+
+    // 3. Vấn đáp, giải thích căn tố, tra nghĩa, giải thích ngữ pháp bằng Gemini AI
+    const systemPrompt = `Bạn là "Trợ lý AI Học Từ Vựng & Ngữ Pháp Tiếng Ả Rập" thân thiện, thông thái và am hiểu sâu sắc về tiếng Ả Rập.
+Người dùng hỏi: "${raw}"
+
+Nhiệm vụ của bạn:
+- Giải đáp chi tiết, sư phạm, nhiệt tình và dễ hiểu bằng tiếng Việt.
+- Nếu người dùng hỏi giải thích căn tố (Root - جذر), khuôn mẫu (Pattern - وزن) hoặc phân tích một từ vựng: Hãy phân tích chi tiết gồm: từ có đầy đủ dấu thanh (harakat), phiên âm, căn tố 3 chữ cái, khuôn mẫu wazn, ý niệm gốc, các từ vựng cùng họ (word family / المشتقات) và câu ví dụ minh họa có dấu thanh kèm dịch nghĩa.
+- Nếu người dùng hỏi tra từ: Cung cấp từ có dấu, nghĩa tiếng Việt, phát âm, từ loại và câu ví dụ.
+- Nếu người dùng hỏi về ngữ pháp hay giao tiếp: Giải thích rõ ràng, ví dụ cụ thể có dấu thanh.
+- Trình bày định dạng Markdown đẹp mắt (dùng **in đậm**, *in nghiêng*, bullet points •, tiêu đề rõ ràng).`;
+
+    const requestBody = {
+      contents: [{
+        parts: [{ text: systemPrompt }]
+      }]
+    };
+
+    let lastError = null;
+    for (const model of candidateModels) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) {
+          const errData = await response.json().catch(() => ({}));
+          const errMsg = errData?.error?.message || `HTTP ${response.status}`;
+          lastError = new Error(errMsg);
+          continue;
+        }
+
+        const data = await response.json();
+        const replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (replyText && replyText.trim()) {
+          return {
+            reply: replyText.trim(),
+            intent: 'EXPLAIN_VOCABULARY',
+            actionResult: null
+          };
+        }
+      } catch (err) {
+        lastError = err;
+      }
+    }
 
     return {
-      foundInLexicon: false,
-      wordWithHarakat: isArabic ? (raw.endsWith('ة') ? `${raw}` : `${raw}ٌ`) : 'كَلِمَةٌ',
-      wordPlain: isArabic ? plain : 'كلمة',
-      primaryMeaningVi: isArabic ? 'Từ vựng tiếng Ả Rập' : query,
-      primaryMeaningEn: '',
-      partOfSpeech: 'noun',
-      cefrLevel: 'A2',
-      ipa: isArabic ? `/${plain}/` : '/ka.li.ma/',
-      transliteration: isArabic ? plain : 'kalimah',
-      rootLetters: isArabic && plain.length >= 3 ? `${plain[0]}-${plain[1]}-${plain[2]}` : 'ك-ل-م',
-      patternWazn: plain.endsWith('ة') ? 'فَعِلَة' : 'فَعَل',
-      pluralForm: plain.endsWith('ة') ? `${plain.replace(/ة$/, '')}َاتٌ` : null,
-      pluralType: plain.endsWith('ة') ? 'sound_feminine' : 'broken',
-      gender: plain.endsWith('ة') ? 'feminine' : 'masculine',
-      exampleAr: isArabic ? `يُسْتَخْدَمُ هَذَا اللَّفْظُ فِي السِّيَاقِ اليَوْمِيِّ.` : '',
-      exampleVi: isArabic ? `Từ này thường được dùng trong ngữ cảnh hàng ngày.` : ''
+      reply: `⚠️ Không thể kết nối với Gemini AI (${lastError ? lastError.message : 'Vui lòng kiểm tra kết nối mạng'}).`,
+      intent: 'ERROR',
+      actionResult: null
     };
   }
 
@@ -5322,8 +5531,25 @@ async function handleOfflineApi(path, options = {}) {
 
   // 11. AI Auto Enrich
   if (path === '/api/v1/arabic/ai/enrich' && method === 'POST') {
-    const enriched = store.enrichWord(body.query);
+    const enriched = await store.enrichWord(body.query);
     return { success: true, data: enriched, ...enriched };
+  }
+
+  // 11.1 AI Chat Assistant (Vấn đáp, giải thích căn tố, nạp từ)
+  if (path === '/api/v1/arabic/ai/chat' && method === 'POST') {
+    return await store.processAiChat(body.message, body.preferredDeckId);
+  }
+
+  // 11.2 AI Context Sentence Generation
+  if (path === '/api/v1/arabic/ai/context' && method === 'POST') {
+    const term = body.word || body.query || '';
+    const enriched = await store.enrichWord(term);
+    return {
+      success: true,
+      ...enriched,
+      sentenceAr: enriched.exampleAr || '',
+      sentenceVi: enriched.exampleVi || ''
+    };
   }
 
   // 12. Batch TSV Import
@@ -5405,8 +5631,18 @@ const state = {
   articlesList: []
 };
 
-// Fast server availability check for file:// origin
+// Fast server availability check for file:// origin or static hosting (GitHub Pages, etc.)
 async function checkServerAvailability() {
+  const isStaticHost = typeof window !== 'undefined' && (
+    window.location.hostname.endsWith('github.io') ||
+    window.location.hostname.includes('vercel.app') ||
+    window.location.hostname.includes('netlify.app') ||
+    window.location.hostname.includes('pages.dev')
+  );
+  if (isStaticHost) {
+    state.serverAvailable = false;
+    return false;
+  }
   if (window.location.protocol !== 'file:') {
     state.serverAvailable = true;
     return true;
@@ -5469,7 +5705,7 @@ function _tryEnqueueOfflineEvent(path, options = {}) {
 async function api(path, options = {}) {
   const isFileProto = window.location.protocol === 'file:';
   
-  if (isFileProto && state.serverAvailable === false) {
+  if (state.serverAvailable === false || (isFileProto && state.serverAvailable !== true)) {
     if (typeof handleOfflineApi === 'function') {
       _tryEnqueueOfflineEvent(path, options);
       return await handleOfflineApi(path, options);
@@ -7071,6 +7307,18 @@ async function saveWordFromArabicReader() {
   } catch (err) {
     alert('Lỗi lưu từ: ' + err.message);
     if (btn) btn.innerHTML = originalHtml;
+  }
+}
+
+function askAiAboutWord(word) {
+  if (!word) return;
+  const clean = word.trim();
+  closeArabicReaderPopup();
+  openAiChatModal();
+  const input = document.getElementById('ai-chat-input');
+  if (input) {
+    input.value = `Giải thích căn tố từ ${clean}`;
+    sendAiChatMessage();
   }
 }
 
